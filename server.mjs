@@ -907,12 +907,47 @@ async function pmoParityHarness(){
   return {ok:results.every(x=>x.pass), total:results.length, passed:results.filter(x=>x.pass).length, results};
 }
 
+function uniqSorted(arr){ return [...new Set(arr.filter(Boolean).map(x=>String(x).trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b)); }
+async function optionSetsForUi(){
+  const items=await allItems(); const users=await mondayUsers();
+  return { ok:true,
+    owners:uniqSorted(items.map(x=>x.owner)),
+    resources:uniqSorted(items.map(x=>x.assignedResource)),
+    statuses:uniqSorted(items.map(x=>x.status).concat(['Ready','Conditional','Blocked'])),
+    types:uniqSorted(items.map(x=>x.type)),
+    sources:uniqSorted(items.map(x=>x.source)),
+    mondayUsers:users.map(u=>({id:u.id,name:u.name,email:u.email,enabled:u.enabled})).sort((a,b)=>String(a.name).localeCompare(String(b.name)))
+  };
+}
+function extractFieldPreview(raw='', item={}){
+  const text=String(raw||''); const low=text.toLowerCase(); const proposed={}; const evidence=[];
+  const dateRe=/\b(20\d{2}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\b/g; const dates=[...text.matchAll(dateRe)].map(m=>m[1]);
+  if(dates[0] && /rfs|ready for service|service/.test(low)){ proposed.rfs=dates[0]; evidence.push({field:'rfs',value:dates[0],why:'RFS/service date mentioned'}); }
+  if(dates[0] && /install|customer|activation/.test(low)){ proposed.installDate=dates[0]; evidence.push({field:'installDate',value:dates[0],why:'install/customer/activation date mentioned'}); }
+  const statusMatch=low.match(/\b(ready|conditional|blocked|hold|on hold)\b/); if(statusMatch){ proposed.status=statusMatch[1].includes('hold')?'Blocked':statusMatch[1][0].toUpperCase()+statusMatch[1].slice(1); evidence.push({field:'status',value:proposed.status,why:'status keyword mentioned'}); }
+  const ownerMatch=text.match(/(?:owner|pm|project manager)\s*(?:is|=|:)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/); if(ownerMatch){ proposed.owner=ownerMatch[1].trim(); evidence.push({field:'owner',value:proposed.owner,why:'owner/PM phrase mentioned'}); }
+  const resMatch=text.match(/(?:splicer|crew|resource|assigned to)\s*(?:is|=|:)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/); if(resMatch){ proposed.assignedResource=resMatch[1].trim(); evidence.push({field:'assignedResource',value:proposed.assignedResource,why:'splicer/crew/resource phrase mentioned'}); }
+  if(/permit/.test(low)){ proposed.blocker=/approved|cleared|complete/.test(low)?'Permit appears cleared; verify source proof.':'Permit checkpoint mentioned; verify current permit status.'; evidence.push({field:'blocker',value:proposed.blocker,why:'permit mentioned'}); }
+  if(/splice|light|network|test/.test(low)){ proposed.action='Confirm splice/light/Network checkpoint and post proof.'; evidence.push({field:'action',value:proposed.action,why:'splice/light/network/test mentioned'}); }
+  const merged={...item,...proposed};
+  return { ok:true, sourceItem:{itemId:item.itemId||item.id,name:item.name}, raw:text, proposedUpdates:proposed, evidence, mergedPreview:merged, mondayWriteSupported:false, note:'Preview only: this does not overwrite Monday fields. Queue/post comments first; field writeback needs explicit field map.' };
+}
+async function featureBehaviorTests(){
+  const items=await allItems(); const sample=items.find(x=>x.itemId)||items[0]||{}; const options=await optionSetsForUi();
+  const queries=['show readiness blockers','draft ask Jim for splice checkpoint','find MDU work','show upcoming RFS items','unassigned resource'];
+  const queryResults=queries.map(q=>{const rows=filterItems(items,q,{});return {query:q,count:rows.length,pass:rows.length>0,first:rows[0]?.name||null};});
+  const fieldPreview=extractFieldPreview('Jim said owner is Kyle Davis, splicer is Justin Archuleta, RFS 10/14/2026, install 10/18/2026, permit approved, light test still needed.', sample);
+  const mentions=await (async()=>{const users=await mondayUsers(); const names=['Kyle','Jim','Ben','Leah']; return names.map(n=>{const u=findMondayUser(n,users); return {name:n,found:Boolean(u),id:u?.id||null,email:u?.email||null,mention:u?mondayMention(u,n):'@'+n};});})();
+  const bridge=await bridgeRecordsCompat(); const prep=await tuesdayPrep({}); const reminder=await runTuesdayReminder({dryRun:true,force:true});
+  return { ok: queryResults.every(x=>x.pass) && Object.keys(fieldPreview.proposedUpdates).length>=4 && options.statuses.length>=3, queryResults, dropdownOptionCounts:{owners:options.owners.length,resources:options.resources.length,statuses:options.statuses.length,types:options.types.length,mondayUsers:options.mondayUsers.length}, fieldPreview, mentions, bridgeCounts:bridge.counts, tuesdayGroups:prep.groups.length, reminderDryRun:{due:reminder.due,groups:reminder.groups.length,posted:reminder.posted||0,queued:reminder.queued||0}, generatedAt:new Date().toISOString() };
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'OPTIONS') return send(res, 200, { ok: true });
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (req.method === 'HEAD' && url.pathname === '/') return send(res, 200, '');
-    if (req.method === 'GET' && url.pathname === '/') return serveFile(res, path.join(PUBLIC, 'index.html'));
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/classic')) return serveFile(res, path.join(PUBLIC, 'index.html'));
     if (req.method === 'GET' && url.pathname.startsWith('/assets/')) return serveFile(res, path.join(PUBLIC, url.pathname.replace('/assets/', '')));
     if (req.method === 'GET' && url.pathname === '/api/health') {
       const items = await allItems(); const queue = await readJson(files.queue, []); const token = await mondayToken();
@@ -1035,6 +1070,15 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok:true, queued:(prep.groups||[]).length, prep });
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/mentions/resolve') {
+      const body = await parseBody(req);
+      const users = await mondayUsers();
+      const names = [...new Set([...(body.recipients||[]), ...extractRecipients(body.text||'')])].filter(Boolean);
+      const matches = names.map(name => ({ name, match: findMondayUser(name, users) })).map(x => ({ requested:x.name, found:Boolean(x.match), id:x.match?.id||null, name:x.match?.name||null, email:x.match?.email||null, mention:x.match ? mondayMention(x.match, x.name) : '@'+String(x.name).replace(/^@/,'') }));
+      const enriched = await enrichMentions(body.text || '', body.recipients || []);
+      return send(res, 200, { ok:true, usersCached:users.length, requested:names, matches, enriched });
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/people') {
       const users = await mondayUsers();
       const q = String(url.searchParams.get('q') || '').toLowerCase();
@@ -1101,6 +1145,19 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/pmo/dashboard') return send(res, 200, await pmoDashboard());
     if (req.method === 'POST' && url.pathname === '/api/pmo/ask') { const body=await parseBody(req); return send(res, 200, await pmoAsk(body)); }
     if (req.method === 'GET' && url.pathname === '/api/pmo/parity') return send(res, 200, await pmoParityHarness());
+    if (req.method === 'GET' && url.pathname === '/api/function-audit/full') {
+      const users = await mondayUsers();
+      const bridge = await bridgeRecordsCompat();
+      const prep = await tuesdayPrep({});
+      const behavior = await behaviorTests();
+      const deploy = await deploymentTest();
+      const reminders = await reminderConfig();
+      const items = await allItems();
+      return send(res, 200, { ok:true, ui:{root:'original public/index.html', classic:'/classic', operator:'/operator', kyle:'/kyle optional'}, counts:{items:items.length, mondayUsers:users.length, bridgeRows:bridge.rows.length, bridgeLinked:bridge.counts.linked, bridgeReview:bridge.counts.review, tuesdayGroups:prep.groups.length}, reminders, behaviorPass:behavior.ok, deploymentPass:deploy.checks.every(c=>c.pass), checks:{behavior, deploy} });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/ui/options') return send(res, 200, await optionSetsForUi());
+    if (req.method === 'POST' && url.pathname === '/api/capture/field-preview') { const body=await parseBody(req); const item=(await allItems()).find(r=>String(r.itemId||r.id)===String(body.itemId||body.id)) || body.item || {}; return send(res, 200, extractFieldPreview(body.rawUpdate||body.text||'', item)); }
+    if (req.method === 'GET' && url.pathname === '/api/feature-behavior/tests') return send(res, 200, await featureBehaviorTests());
     if (req.method === 'GET' && url.pathname === '/api/audit') return send(res, 200, { ok: true, audit: await readJson(files.audit, []) });
     return send(res, 404, { ok: false, error: 'Not found' });
   } catch (e) { return send(res, e.status || 500, { ok: false, error: e.message === 'fetch failed' ? 'fetch failed — Node could not reach Monday API. Work firewall/proxy may block api.monday.com from local apps.' : e.message, details: e.details || undefined }); }
