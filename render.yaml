@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: splicing-planning-assistant
+    env: node
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: node server.mjs
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: MONDAY_API_KEY
+        sync: false
+      - key: TEAMS_WEBHOOK_URL
+        sync: false

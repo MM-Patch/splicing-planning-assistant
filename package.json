@@ -1,0 +1,7 @@
+{
+  "name": "splicing-planning-assistant",
+  "version": "0.15.0",
+  "type": "module",
+  "scripts": {"start":"node server.mjs"},
+  "engines": {"node": ">=20"}
+}

@@ -1,0 +1,22 @@
+HOW TO OPEN V7
+
+Mac:
+1. Double-click start-mac.command.
+2. If blocked by Apple, right-click > Open.
+3. Browser should open http://127.0.0.1:8787.
+
+Windows:
+1. Double-click start-windows.bat.
+2. Browser should open http://127.0.0.1:8787.
+
+Do not use file:// if you need token save, Monday sync, dual-post, or queues.
+Use http://127.0.0.1:8787 while the terminal/launcher window stays open.
+
+Setup:
+1. Settings / Secrets.
+2. Save Monday API token.
+3. Test Monday.
+4. Project Tracker board ID is prefilled as 5077578194.
+5. Sync D2D + Tracker.
+6. Open Source Bridge and review links.
+7. Use Tuesday RFS Prep to queue owner-specific asks.
