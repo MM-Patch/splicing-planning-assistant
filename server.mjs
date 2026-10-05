@@ -909,29 +909,64 @@ async function pmoParityHarness(){
 
 function uniqSorted(arr){ return [...new Set(arr.filter(Boolean).map(x=>String(x).trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b)); }
 async function optionSetsForUi(){
-  const items=await allItems(); const users=await mondayUsers();
+  const items=await allItems(); let users=[]; try{ users=await mondayUsers(); }catch(e){ users=[]; }
+  const fallbackOwners=['Ralph Pike','Patch','Kyle','Unassigned'];
+  const fallbackResources=['Unassigned','Kyle Davis','Ralph Pike','Splicing Crew','Construction Crew'];
   return { ok:true,
-    owners:uniqSorted(items.map(x=>x.owner)),
-    resources:uniqSorted(items.map(x=>x.assignedResource)),
-    statuses:uniqSorted(items.map(x=>x.status).concat(['Ready','Conditional','Blocked'])),
-    types:uniqSorted(items.map(x=>x.type)),
+    projectCardFields:['owner','assignedResource','type','zoneType','fiberStatus','status','score','blocker','action','rfs','installDate','priority','updateCount','workDate'],
+    owners:uniqSorted(items.map(x=>x.owner).concat(fallbackOwners).concat(users.map(u=>u.name))),
+    resources:uniqSorted(items.map(x=>x.assignedResource).concat(fallbackResources).concat(users.map(u=>u.name))),
+    types:uniqSorted(items.map(x=>x.type).concat(['MDU','SFU','Commercial','Mixed','Backbone','Unknown'])),
+    zoneTypes:uniqSorted(items.map(x=>x.zoneType).concat(['NEW','OVERBUILD','REBUILD','EXPANSION','MAINTENANCE','UNKNOWN'])),
+    fiberStatuses:uniqSorted(items.map(x=>x.fiberStatus).concat(['Complete/Live','Complete','Live','In Progress','Not Started','Blocked','Unknown'])),
+    statuses:uniqSorted(items.map(x=>x.status).concat(['Ready','Conditional','Blocked','On Hold','Needs Review','Complete'])),
+    priorities:uniqSorted(items.map(x=>x.priority).concat(['Imported','Hot','High','Medium','Low','Critical'])),
+    scores:uniqSorted(items.map(x=>x.score).concat(['1','2','3','4','5','6','7','8','9','10'])),
     sources:uniqSorted(items.map(x=>x.source)),
     mondayUsers:users.map(u=>({id:u.id,name:u.name,email:u.email,enabled:u.enabled})).sort((a,b)=>String(a.name).localeCompare(String(b.name)))
   };
 }
-function extractFieldPreview(raw='', item={}){
-  const text=String(raw||''); const low=text.toLowerCase(); const proposed={}; const evidence=[];
-  const dateRe=/\b(20\d{2}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\b/g; const dates=[...text.matchAll(dateRe)].map(m=>m[1]);
-  if(dates[0] && /rfs|ready for service|service/.test(low)){ proposed.rfs=dates[0]; evidence.push({field:'rfs',value:dates[0],why:'RFS/service date mentioned'}); }
-  if(dates[0] && /install|customer|activation/.test(low)){ proposed.installDate=dates[0]; evidence.push({field:'installDate',value:dates[0],why:'install/customer/activation date mentioned'}); }
-  const statusMatch=low.match(/\b(ready|conditional|blocked|hold|on hold)\b/); if(statusMatch){ proposed.status=statusMatch[1].includes('hold')?'Blocked':statusMatch[1][0].toUpperCase()+statusMatch[1].slice(1); evidence.push({field:'status',value:proposed.status,why:'status keyword mentioned'}); }
-  const ownerMatch=text.match(/(?:owner|pm|project manager)\s*(?:is|=|:)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/); if(ownerMatch){ proposed.owner=ownerMatch[1].trim(); evidence.push({field:'owner',value:proposed.owner,why:'owner/PM phrase mentioned'}); }
-  const resMatch=text.match(/(?:splicer|crew|resource|assigned to)\s*(?:is|=|:)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/); if(resMatch){ proposed.assignedResource=resMatch[1].trim(); evidence.push({field:'assignedResource',value:proposed.assignedResource,why:'splicer/crew/resource phrase mentioned'}); }
-  if(/permit/.test(low)){ proposed.blocker=/approved|cleared|complete/.test(low)?'Permit appears cleared; verify source proof.':'Permit checkpoint mentioned; verify current permit status.'; evidence.push({field:'blocker',value:proposed.blocker,why:'permit mentioned'}); }
-  if(/splice|light|network|test/.test(low)){ proposed.action='Confirm splice/light/Network checkpoint and post proof.'; evidence.push({field:'action',value:proposed.action,why:'splice/light/network/test mentioned'}); }
-  const merged={...item,...proposed};
-  return { ok:true, sourceItem:{itemId:item.itemId||item.id,name:item.name}, raw:text, proposedUpdates:proposed, evidence, mergedPreview:merged, mondayWriteSupported:false, note:'Preview only: this does not overwrite Monday fields. Queue/post comments first; field writeback needs explicit field map.' };
+function normalizeDateToken(v){
+  const raw=String(v||'').trim(); if(!raw) return '';
+  const iso=raw.match(/^(20\d{2})-(\d{1,2})-(\d{1,2})$/); if(iso) return `${iso[1]}-${String(iso[2]).padStart(2,'0')}-${String(iso[3]).padStart(2,'0')}`;
+  const us=raw.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/); if(us){ const y=us[3] ? (us[3].length===2?'20'+us[3]:us[3]) : String(new Date().getFullYear()); return `${y}-${String(us[1]).padStart(2,'0')}-${String(us[2]).padStart(2,'0')}`; }
+  return raw;
 }
+function cleanProjectValue(v){ return String(v||'').replace(/[.;,]+$/,'').replace(/^[-:=>\s]+/,'').trim(); }
+function pushProposal(proposed,evidence,field,value,why,confidence='medium'){
+  value=cleanProjectValue(value); if(value==='') return;
+  proposed[field]=value; evidence.push({field,value,why,confidence});
+}
+function extractAnyProjectCardFields(raw='', item={}){
+  const text=String(raw||''); const proposed={}; const evidence=[]; const relevantNotes=[];
+  const specs=[
+    {field:'owner', rx:/(?:owner|project owner|pm|project manager)\s*(?:is|=|:|to|should be|changed? to)?\s*([^;\n,.]+)/i},
+    {field:'assignedResource', rx:/(?:assigned resource|resource|assigned to|crew|splicer)\s*(?:is|=|:|to|should be|changed? to)?\s*([^;\n,.]+)/i},
+    {field:'type', rx:/(?:project type|type)\s*(?:is|=|:|to|should be|changed? to)?\s*\b(MDU|SFU|Commercial|Mixed|Backbone|Unknown)\b/i},
+    {field:'zoneType', rx:/(?:zone type|zone)\s*(?:is|=|:|to|should be|changed? to)?\s*\b(NEW|OVERBUILD|REBUILD|EXPANSION|MAINTENANCE|UNKNOWN)\b/i},
+    {field:'fiberStatus', rx:/(?:fiber status|fiber)\s*(?:is|=|:|to|should be|changed? to)?\s*([^;\n,.]+)/i},
+    {field:'status', rx:/(?:status)\s*(?:is|=|:|to|should be|changed? to)?\s*\b(Ready|Conditional|Blocked|On Hold|Needs Review|Complete)\b/i},
+    {field:'score', rx:/(?:score)\s*(?:is|=|:|to|should be|changed? to)?\s*\b(10|[1-9])\b/i},
+    {field:'priority', rx:/(?:priority)\s*(?:is|=|:|to|should be|changed? to)?\s*\b(Imported|Hot|High|Medium|Low|Critical)\b/i},
+    {field:'updateCount', rx:/(?:update count|updates?)\s*(?:is|=|:|to|should be|changed? to)?\s*\b(\d+)\b/i},
+    {field:'blocker', rx:/(?:blocker|blocked by|issue|risk)\s*(?:is|=|:|to|should be|changed? to)?\s*([^;\n]+)/i},
+    {field:'action', rx:/(?:next action|action|to do|todo)\s*(?:is|=|:|to|should be|changed? to)?\s*([^;\n]+)/i}
+  ];
+  for(const spec of specs){ const m=text.match(spec.rx); if(m) pushProposal(proposed,evidence,spec.field,m[1],`explicit ${spec.field} phrase`,'high'); }
+  const dateSpecs=[
+    {field:'rfs', rx:/(?:rfs|ready for service|service date)\s*(?:date)?\s*(?:is|=|:|to|should be|changed? to)?\s*(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i},
+    {field:'installDate', rx:/(?:install date|installation date|install|customer activation|activation date)\s*(?:is|=|:|to|should be|changed? to)?\s*(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i},
+    {field:'workDate', rx:/(?:work date|workday|work day|field date|crew date)\s*(?:is|=|:|to|should be|changed? to)?\s*(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i}
+  ];
+  for(const spec of dateSpecs){ const m=text.match(spec.rx); if(m) pushProposal(proposed,evidence,spec.field,normalizeDateToken(m[1]),`explicit ${spec.field} date phrase`,'high'); }
+  if(!proposed.status){ if(/\b(no go|blocked|cannot proceed|waiting on|hold|on hold)\b/i.test(text)) pushProposal(proposed,evidence,'status','Blocked','natural-language blocker/status inference','medium'); else if(/\b(ready|good to go|cleared|can proceed)\b/i.test(text)) pushProposal(proposed,evidence,'status','Ready','natural-language ready/status inference','medium'); }
+  if(!proposed.priority){ if(/\b(urgent|critical|hot|asap|today)\b/i.test(text)) pushProposal(proposed,evidence,'priority','Hot','urgency keyword inference','medium'); else if(/\b(high priority)\b/i.test(text)) pushProposal(proposed,evidence,'priority','High','priority keyword inference','medium'); }
+  if(!proposed.action){ const act=text.match(/(?:need to|needs to|please|next we should|we should|follow up to)\s+([^;\n.]+)/i); if(act) pushProposal(proposed,evidence,'action',act[1],'natural-language action extraction','medium'); }
+  if(!proposed.blocker){ const blk=text.match(/(?:waiting on|blocked by|held by|depends on)\s+([^;\n.]+)/i); if(blk) pushProposal(proposed,evidence,'blocker',blk[1],'natural-language dependency/blocker extraction','medium'); }
+  for(const sent of text.split(/(?<=[.!?])\s+|\n+/).map(s=>s.trim()).filter(Boolean)){ if(/\b(owner|resource|crew|splicer|type|zone|fiber|status|score|blocker|risk|issue|action|rfs|ready for service|install|activation|priority|work date|waiting on|blocked|ready|complete|live|permit|authority|customer|meeting|note)\b/i.test(sent)) relevantNotes.push(sent); }
+  return { ok:true, sourceItem:{itemId:item.itemId||item.id,name:item.name}, raw:text, extractedFields:Object.keys(proposed), proposedUpdates:proposed, evidence, relevantNotes, mergedPreview:{...item,...proposed}, mondayWriteSupported:false, note:'Preview only: extracted project-card intelligence for human review/comment drafting. It does not overwrite Monday fields unless explicit field-map writeback is enabled.' };
+}
+function extractFieldPreview(raw='', item={}){ return extractAnyProjectCardFields(raw,item); }
 async function featureBehaviorTests(){
   const items=await allItems(); const sample=items.find(x=>x.itemId)||items[0]||{}; const options=await optionSetsForUi();
   const queries=['show readiness blockers','draft ask Jim for splice checkpoint','find MDU work','show upcoming RFS items','unassigned resource'];
