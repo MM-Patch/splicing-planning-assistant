@@ -933,15 +933,16 @@ function normalizeDateToken(v){
   return raw;
 }
 function cleanProjectValue(v){ return String(v||'').replace(/[.;,]+$/,'').replace(/^[-:=>\s]+/,'').trim(); }
+function firstClause(v){ return cleanProjectValue(String(v||'').split(/\s*(?:;|,\s*(?:owner|assigned resource|resource|crew|splicer|type|zone|fiber status|status|score|blocker|action|rfs|install date|priority|update count|work date)\b|\b(?:rfs|install date|priority|update count|work date|action|blocker|status|score)\b\s*)/i)[0]); }
 function pushProposal(proposed,evidence,field,value,why,confidence='medium'){
-  value=cleanProjectValue(value); if(value==='') return;
+  value=field==='blocker'||field==='action'?firstClause(value):cleanProjectValue(value); if(value==='') return;
   proposed[field]=value; evidence.push({field,value,why,confidence});
 }
 function extractAnyProjectCardFields(raw='', item={}){
   const text=String(raw||''); const proposed={}; const evidence=[]; const relevantNotes=[];
   const specs=[
     {field:'owner', rx:/(?:owner|project owner|pm|project manager)\s*(?:is|=|:|to|should be|changed? to)?\s*([^;\n,.]+)/i},
-    {field:'assignedResource', rx:/(?:assigned resource|resource|assigned to|crew|splicer)\s*(?:is|=|:|to|should be|changed? to)?\s*([^;\n,.]+)/i},
+    {field:'assignedResource', rx:/(?:assigned resource|resource|assigned to|crew|splicer|assign)\s*(?:is|=|:|to|should be|changed? to)?\s*([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+){0,3})/i},
     {field:'type', rx:/(?:project type|type)\s*(?:is|=|:|to|should be|changed? to)?\s*\b(MDU|SFU|Commercial|Mixed|Backbone|Unknown)\b/i},
     {field:'zoneType', rx:/(?:zone type|zone)\s*(?:is|=|:|to|should be|changed? to)?\s*\b(NEW|OVERBUILD|REBUILD|EXPANSION|MAINTENANCE|UNKNOWN)\b/i},
     {field:'fiberStatus', rx:/(?:fiber status|fiber)\s*(?:is|=|:|to|should be|changed? to)?\s*([^;\n,.]+)/i},
