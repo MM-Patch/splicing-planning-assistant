@@ -221,7 +221,7 @@ async function bridgeCandidatesForItem(itemId) {
   const row = rows.find(r => String(r.d2d?.itemId) === String(itemId) || String(r.tracker?.itemId) === String(itemId));
   if (!row) return { row: null, candidates: [] };
   const sourceName = row.name || row.d2d?.name || row.tracker?.name || '';
-  const sourceTokens = tokens(sourceName);
+  const sourceTokens = new Set([...tokens(sourceName)].filter(t => t.length >= 4 && !['with','check','install','dates','capital','court'].includes(t)));
   const candidates = rows
     .filter(r => r.tracker && String(r.tracker.itemId) !== String(itemId))
     .map(r => {
@@ -231,7 +231,7 @@ async function bridgeCandidatesForItem(itemId) {
       const shared = [...sourceTokens].filter(t => text.toLowerCase().includes(t));
       return { itemId: r.tracker.itemId, boardId: r.tracker.boardId || '', name, url: r.tracker.url, score: Number(score.toFixed(3)), sharedTokens: shared, confidence: r.confidence || 'candidate' };
     })
-    .filter(c => c.score > 0 || c.sharedTokens.length)
+    .filter(c => c.score >= 0.15 || c.sharedTokens.length >= 2)
     .sort((a,b) => (b.score + b.sharedTokens.length*.15) - (a.score + a.sharedTokens.length*.15))
     .slice(0, 10);
   return { row, candidates };
@@ -889,6 +889,10 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, updateId: data.create_update?.id });
     }
 
+    if (req.method === 'GET' && url.pathname.startsWith('/api/bridge/candidates/')) {
+      const id = decodeURIComponent(url.pathname.split('/').pop() || '');
+      return send(res, 200, { ok:true, ...(await bridgeCandidatesForItem(id)) });
+    }
     if (req.method === 'GET' && url.pathname === '/api/bridge') {
       const rows = await bridgeRecords();
       return send(res, 200, { ok: true, rows, counts: { total: rows.length, linked: rows.filter(r => r.d2d && r.tracker).length, review: rows.filter(r => r.needsReview).length } });
