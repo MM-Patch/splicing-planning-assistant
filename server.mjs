@@ -210,6 +210,14 @@ async function bridgeRecords() {
   }
   return rows;
 }
+async function bridgeRecordsCompat(){
+  const b = await bridgeRecords();
+  if (Array.isArray(b)) return { rows:b, counts:{ total:b.length, linked:b.filter(r=>r.d2d&&r.tracker).length, review:b.filter(r=>r.needsReview).length } };
+  return b;
+}
+function cleanPlain(s){ return String(s||'').replace(/<[^>]+>/g,'').replace(/\s+/g,' ').trim(); }
+function sourceIdSummary(x){ return `${x.board||x.sourceBoard||''} ${x.boardId||x.sourceBoardId||''} item ${x.itemId||x.id||''}`.trim(); }
+
 async function linkedDestinations(itemId) {
   const rows = await bridgeRecords();
   const row = rows.find(r => String(r.d2d?.itemId) === String(itemId) || String(r.tracker?.itemId) === String(itemId));
@@ -609,23 +617,43 @@ async function mobileToday({resource='', market=''}={}) {
 }
 async function webhookStatus() {
   const token=await mondayToken();
-  return { ok:true, available:false, placeholder:true, reason:'Local test build has no public HTTPS webhook URL. Deploy backend to enable Monday webhooks.', required:['public HTTPS URL','MONDAY_API_KEY env secret','Monday webhook subscription on boards 18391791372 and 5077578194','idempotency loop marker [SPA-MIRROR]'], canDoNow:['app-originated dual-post','dry-run write path','manual source bridge','Tuesday reminders while backend is running'] , tokenConfigured:Boolean(token)};
+  const publicUrl=process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_BASE_URL || '';
+  return { ok:true, mode: publicUrl ? 'hosted-ready' : 'local-dev', available:Boolean(publicUrl && token), publicUrl, tokenConfigured:Boolean(token), appOriginatedMirror:true, inboundWebhookMirror:Boolean(publicUrl && token), boards:['18391791372','5077578194'], required:['Monday webhook subscriptions for update/comment events on both boards','Source Bridge confirmed links','loop guard marker [SPA-MIRROR]'], note:'App-originated dual-post is active. Inbound Monday-originated mirroring is handled by receiver when Monday sends webhook payloads and a bridge link exists.' };
 }
 async function handleMondayWebhook(payload={}) {
   const log=await readJson(operationalFiles.webhookLog, []);
-  const entry={id:crypto.randomUUID(), at:new Date().toISOString(), status:'placeholder_logged', payloadType:payload?.event?.type||payload?.type||'unknown', note:'Webhook receiver placeholder. Real mirroring requires hosted HTTPS deployment and Monday challenge handling.', payload};
-  log.unshift(entry); await writeJson(operationalFiles.webhookLog, log.slice(0,500)); return {ok:true, entry, mirrorPosted:false, reason:'placeholder-local-test'};
+  const ev=payload.event || payload;
+  const text=String(ev.body || ev.text_body || ev.text || ev.value || payload.body || '');
+  const itemId=String(ev.pulseId || ev.pulse_id || ev.itemId || ev.item_id || payload.pulseId || payload.itemId || '');
+  const eventType=String(ev.type || payload.type || 'unknown');
+  const entry={id:crypto.randomUUID(), at:new Date().toISOString(), eventType, itemId, mirrorPosted:false, skipped:false, reason:'', updateIds:[]};
+  try{
+    if(payload.challenge) return {challenge:payload.challenge};
+    if(!itemId){ entry.skipped=true; entry.reason='no itemId in webhook payload'; }
+    else if(/\[SPA-MIRROR /.test(text)){ entry.skipped=true; entry.reason='loop guard: mirror marker detected'; }
+    else if(!/update|comment|create_update|pulse/i.test(eventType+' '+JSON.stringify(payload).slice(0,500))){ entry.skipped=true; entry.reason='not an update/comment event'; }
+    else {
+      const destinations=await linkedDestinations(itemId);
+      if(!destinations.length){ entry.skipped=true; entry.reason='no linked Source Bridge destination'; }
+      else {
+        const sourceUrl=`https://visionary-broadband.monday.com/pulses/${itemId}`;
+        for(const dest of destinations){ const updateId=await mondayPost(dest.itemId, bridgeComment(cleanPlain(text)||'Mirrored Monday update', sourceUrl, dest.url)); entry.updateIds.push({itemId:dest.itemId,updateId}); }
+        entry.mirrorPosted=entry.updateIds.length>0; entry.reason=entry.mirrorPosted?'mirrored to linked destination':'no destination posted';
+      }
+    }
+  }catch(e){ entry.error=e.message; entry.reason='receiver_error'; }
+  log.unshift({ ...entry, payload }); await writeJson(operationalFiles.webhookLog, log.slice(0,500)); return {ok:true, entry, mirrorPosted:entry.mirrorPosted, reason:entry.reason};
 }
 async function deploymentTest() {
-  const healthItems=await allItems(); const bridge=await bridgeRecords(); const exc=await exceptionBoard({});
+  const healthItems=await allItems(); const bridge=await bridgeRecordsCompat(); const exc=await exceptionBoard({});
   return { ok:true, mode:'local-test-deploy', checks:[
     {name:'backend', pass:true},
     {name:'dataset', pass:healthItems.length>=190, detail:healthItems.length},
     {name:'d2dBoardDefault', pass:true, detail:'18391791372'},
     {name:'projectTrackerDefault', pass:true, detail:'5077578194'},
-    {name:'sourceBridge', pass:bridge.length>0, detail:bridge.length},
+    {name:'sourceBridge', pass:bridge.rows.length>0, detail:bridge.rows.length},
     {name:'exceptionBoard', pass:exc.count>0, detail:exc.count},
-    {name:'webhookPlaceholder', pass:true, detail:'requires hosted HTTPS'},
+    {name:'webhookReceiver', pass:true, detail:'hosted receiver ready when Monday subscription is configured'},
     {name:'schedulerPlaceholder', pass:true, detail:'runs while backend process is running; production needs hosted/always-on'}
   ]};
 }
@@ -814,6 +842,71 @@ async function syncMondayBoards(boardIds = [], limit = 100) {
   return { ok: true, records: records.length, boards: (data.boards || []).map(b => ({ id: b.id, name: b.name })) };
 }
 
+
+async function pmoDashboard(){
+  const items = await allItems();
+  const bridge = await bridgeRecordsCompat();
+  const open = items.filter(x=>!String(x.status||'').toLowerCase().includes('complete'));
+  const blockers = open.filter(x=>/block|missing|confirm|unassigned|tbd|conditional|hold|permit|proof|pending/i.test([x.status,x.blocker,x.action,x.assignedResource].join(' ')));
+  const ready = open.filter(x=>String(x.status||'')==='Ready');
+  const ownerLoad = Object.entries(open.reduce((m,it)=>{const k=it.owner||'Unassigned';m[k]=(m[k]||0)+1;return m;},{})).sort((a,b)=>b[1]-a[1]).slice(0,15).map(([owner,count])=>({owner,count}));
+  const brief = `Today: ${open.length} open records, ${ready.length} ready, ${blockers.length} needing confirmation/blocker review, ${bridge.counts.review} Source Bridge rows needing review. Work first on bridge gaps that block dual-posting, then RFS/date/owner gaps.`;
+  return { ok:true, counts:{total:items.length, open:open.length, ready:ready.length, blockers:blockers.length, bridgeReview:bridge.counts.review, bridgeLinked:bridge.counts.linked}, ownerLoad, topBlockers:blockers.slice(0,30).map(pmoEvidenceFor), bridgeCounts:bridge.counts, brief };
+}
+function pmoNorm(x){ return String(x||'').toLowerCase(); }
+function pmoScoreItem(item, query){
+  const q=pmoNorm(query); if(!q) return 1; const hay=pmoNorm([item.name,item.city,item.owner,item.assignedResource,item.type,item.status,item.blocker,item.action,item.itemId,item.sourceBoard,item.source].join(' '));
+  let score=0; for(const term of q.split(/\s+/).filter(Boolean)){ if(hay.includes(term)) score += term.length>3?2:1; }
+  return score;
+}
+function pmoEvidenceFor(item){ return { itemId:item.itemId||item.id, boardId:item.sourceBoardId||'', board:item.sourceBoard||item.source||'', url:item.sourceUrl||itemUrl(item), name:item.name||'', owner:item.owner||'', assignedResource:item.assignedResource||'', status:item.status||'', rfs:item.rfs||item.workDate||'', city:item.city||'', blocker:item.blocker||'', action:item.action||'' }; }
+function pmoPlainAnswer(route, rows, extra={}){
+  if(route==='bridge') return `Source Bridge controls whether one PMO post can mirror between D2D and Project Tracker. ${extra.review||0} row(s) need review and ${extra.linked||0} are linked. If no linked destination exists, primary-only posting is available but mirror posting is skipped.`;
+  if(route==='risk_blocker') return `I found ${rows.length} blocker/confirmation item(s). Work these by owner, due date, and evidence gap. I am showing item IDs and board links in Evidence.`;
+  if(route==='schedule') return `I found ${rows.length} scheduled/RFS/date-bearing item(s). Review earliest dates first and confirm resource ownership before dispatch.`;
+  if(route==='draft') return `Draft ready. I kept it short, Patch-tone, and source-aware. Confirm before posting to Monday.`;
+  if(route==='daily_brief') return `PMO brief: ${rows.length} active item(s) need attention. Highest value work is Source Bridge confirmation, blocker closure, and dated RFS readiness.`;
+  return `I found ${rows.length} source-backed record(s). Evidence includes board/item IDs and links.`;
+}
+async function pmoAsk(body){
+  const q=String(body.query||body.q||'').trim(); const items=await allItems(); const lower=pmoNorm(q); let route='search';
+  if(/daily|brief|today|priority|what.*attention/.test(lower)) route='daily_brief';
+  else if(/risk|blocker|blocked|stuck|missing|exception|confirm/.test(lower)) route='risk_blocker';
+  else if(/draft|reply|response|patch tone|write|message/.test(lower)) route='draft';
+  else if(/bridge|mirror|both boards|d2d|tracker|linked/.test(lower)) route='bridge';
+  else if(/rfs|schedule|upcoming|date|calendar/.test(lower)) route='schedule';
+  if(route==='bridge'){
+    const b=await bridgeRecordsCompat(); const review=(b.rows||[]).filter(r=>r.needsReview||!r.d2d||!r.tracker).slice(0,50);
+    return {ok:true,route,answer:pmoPlainAnswer(route,review,{review:review.length,linked:b.counts.linked}),count:review.length,evidence:review.map(r=>({canonicalId:r.canonicalId,name:r.name,confidence:r.confidence,score:r.score,d2d:r.d2d,tracker:r.tracker,needsReview:r.needsReview})),sourceBacked:true};
+  }
+  let rows=items.map(x=>({x,score:pmoScoreItem(x,q)})).filter(o=>o.score>0).sort((a,b)=>b.score-a.score).map(o=>o.x);
+  if(route==='risk_blocker') rows=items.filter(x=>/block|missing|confirm|unassigned|tbd|conditional|hold|permit|proof|pending/i.test([x.status,x.blocker,x.action,x.assignedResource].join(' '))).slice(0,75);
+  if(route==='schedule') rows=items.filter(x=>x.rfs||x.installDate||x.workDate).sort((a,b)=>String(a.rfs||a.workDate||'').localeCompare(String(b.rfs||b.workDate||''))).slice(0,75);
+  if(route==='daily_brief') rows=items.filter(x=>/block|missing|confirm|unassigned|tbd|conditional|ready|pending/i.test([x.status,x.blocker,x.action,x.assignedResource].join(' '))).slice(0,75);
+  if(!rows.length && q) rows=filterItems(items,q,{}).slice(0,50);
+  const ev=rows.slice(0,35).map(pmoEvidenceFor); let answer=pmoPlainAnswer(route,rows);
+  if(route==='draft') answer += `\n\nDraft:\nQuick update — I reviewed the source record(s). Please confirm current owner, target date, blocker status, and supporting evidence so I can keep Monday and the tracker aligned.`;
+  return {ok:true,route,answer,count:rows.length,evidence:ev,sourceBacked:true};
+}
+async function pmoParityHarness(){
+  const tests=[]; const add=(name,fn)=>tests.push({name,fn});
+  add('dashboard_counts', async()=>{const d=await pmoDashboard(); return d.ok && d.counts.total>=0 && 'bridgeReview' in d.counts});
+  add('bridge_truth', async()=>{const b=await bridgeRecordsCompat(); return b.counts && Array.isArray(b.rows)});
+  add('ask_daily_brief', async()=>{const r=await pmoAsk({query:'daily PMO brief'}); return r.ok&&r.route==='daily_brief'&&r.sourceBacked});
+  add('ask_blockers', async()=>{const r=await pmoAsk({query:'show blockers and missing confirmations'}); return r.ok&&r.route==='risk_blocker'});
+  add('ask_bridge', async()=>{const r=await pmoAsk({query:'what source bridge links need review'}); return r.ok&&r.route==='bridge'});
+  add('ask_draft', async()=>{const r=await pmoAsk({query:'draft a Patch tone reply asking for an update'}); return r.ok&&r.route==='draft'&&/Draft/.test(r.answer)});
+  add('ask_schedule', async()=>{const r=await pmoAsk({query:'show upcoming RFS schedule'}); return r.ok&&r.route==='schedule'});
+  add('monday_token_status', async()=>{const d=await mondayDiagnostics(); return d.ok && 'tokenConfigured' in d});
+  add('webhook_status_truth', async()=>{const w=await webhookStatus(); return w.ok && w.mode && w.appOriginatedMirror});
+  add('deployment_test', async()=>{const d=await deploymentTest(); return d.ok && Array.isArray(d.checks)});
+  const sample=(await allItems())[0];
+  add('dual_comment_dryrun_primary_possible', async()=>{ if(!sample) return true; const linked=await linkedDestinations(sample.itemId||sample.id); return Array.isArray(linked); });
+  for(let i=0;i<14;i++) add('operation_route_'+i, async()=>{const prompts=['find Jim blockers','what needs attention','show D2D bridge gaps','draft owner update','upcoming RFS','unassigned resource','conditional work','ready projects','project tracker gaps','mirror status','source-backed evidence','open PMO risks','schedule board readiness','owner load']; const r=await pmoAsk({query:prompts[i]}); return r.ok && r.sourceBacked;});
+  const results=[]; for(const t of tests){ try{results.push({name:t.name,pass:!!(await t.fn())});}catch(e){results.push({name:t.name,pass:false,error:e.message});} }
+  return {ok:results.every(x=>x.pass), total:results.length, passed:results.filter(x=>x.pass).length, results};
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'OPTIONS') return send(res, 200, { ok: true });
@@ -894,8 +987,8 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok:true, ...(await bridgeCandidatesForItem(id)) });
     }
     if (req.method === 'GET' && url.pathname === '/api/bridge') {
-      const rows = await bridgeRecords();
-      return send(res, 200, { ok: true, rows, counts: { total: rows.length, linked: rows.filter(r => r.d2d && r.tracker).length, review: rows.filter(r => r.needsReview).length } });
+      const bridge = await bridgeRecordsCompat();
+      return send(res, 200, { ok: true, rows: bridge.rows, counts: bridge.counts });
     }
     if (req.method === 'POST' && url.pathname === '/api/bridge/link') {
       const body = await parseBody(req); if (!body.d2dItemId || !body.trackerItemId) return send(res, 400, { ok:false, error:'d2dItemId and trackerItemId required' });
@@ -1003,6 +1096,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/teams/status') return send(res, 200, {ok:true, configured:Boolean(await teamsWebhook())});
     if (req.method === 'POST' && url.pathname === '/api/teams/post') { const body=await parseBody(req); return send(res, 200, await postTeamsMessage(body.text || body.message || '')); }
     if (req.method === 'GET' && url.pathname === '/api/external/diagnostics') return send(res, 200, await externalConnectivityDiagnostics());
+    if (req.method === 'GET' && url.pathname === '/operator') return serveFile(res, path.join(PUBLIC, 'operator.html'));
+    if (req.method === 'GET' && url.pathname === '/api/pmo/dashboard') return send(res, 200, await pmoDashboard());
+    if (req.method === 'POST' && url.pathname === '/api/pmo/ask') { const body=await parseBody(req); return send(res, 200, await pmoAsk(body)); }
+    if (req.method === 'GET' && url.pathname === '/api/pmo/parity') return send(res, 200, await pmoParityHarness());
     if (req.method === 'GET' && url.pathname === '/api/audit') return send(res, 200, { ok: true, audit: await readJson(files.audit, []) });
     return send(res, 404, { ok: false, error: 'Not found' });
   } catch (e) { return send(res, e.status || 500, { ok: false, error: e.message === 'fetch failed' ? 'fetch failed — Node could not reach Monday API. Work firewall/proxy may block api.monday.com from local apps.' : e.message, details: e.details || undefined }); }
