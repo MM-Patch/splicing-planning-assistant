@@ -1097,6 +1097,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/teams/post') { const body=await parseBody(req); return send(res, 200, await postTeamsMessage(body.text || body.message || '')); }
     if (req.method === 'GET' && url.pathname === '/api/external/diagnostics') return send(res, 200, await externalConnectivityDiagnostics());
     if (req.method === 'GET' && url.pathname === '/operator') return serveFile(res, path.join(PUBLIC, 'operator.html'));
+    if (req.method === 'GET' && url.pathname === '/kyle') return serveFile(res, path.join(PUBLIC, 'kyle.html'));
     if (req.method === 'GET' && url.pathname === '/api/pmo/dashboard') return send(res, 200, await pmoDashboard());
     if (req.method === 'POST' && url.pathname === '/api/pmo/ask') { const body=await parseBody(req); return send(res, 200, await pmoAsk(body)); }
     if (req.method === 'GET' && url.pathname === '/api/pmo/parity') return send(res, 200, await pmoParityHarness());
