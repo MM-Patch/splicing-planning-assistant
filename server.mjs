@@ -798,6 +798,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'OPTIONS') return send(res, 200, { ok: true });
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (req.method === 'HEAD' && url.pathname === '/') return send(res, 200, '');
     if (req.method === 'GET' && url.pathname === '/') return serveFile(res, path.join(PUBLIC, 'index.html'));
     if (req.method === 'GET' && url.pathname.startsWith('/assets/')) return serveFile(res, path.join(PUBLIC, url.pathname.replace('/assets/', '')));
     if (req.method === 'GET' && url.pathname === '/api/health') {
