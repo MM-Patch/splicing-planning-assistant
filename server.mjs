@@ -216,6 +216,26 @@ async function linkedDestinations(itemId) {
   if (!row) return [];
   return [row.d2d, row.tracker].filter(x => x && String(x.itemId) !== String(itemId));
 }
+async function bridgeCandidatesForItem(itemId) {
+  const rows = await bridgeRecords();
+  const row = rows.find(r => String(r.d2d?.itemId) === String(itemId) || String(r.tracker?.itemId) === String(itemId));
+  if (!row) return { row: null, candidates: [] };
+  const sourceName = row.name || row.d2d?.name || row.tracker?.name || '';
+  const sourceTokens = tokens(sourceName);
+  const candidates = rows
+    .filter(r => r.tracker && String(r.tracker.itemId) !== String(itemId))
+    .map(r => {
+      const score = jaccard(sourceName, r.tracker.name || r.name || '');
+      const name = r.tracker.name || r.name || '';
+      const text = `${name} ${r.owner||''} ${r.resource||''} ${r.status||''}`;
+      const shared = [...sourceTokens].filter(t => text.toLowerCase().includes(t));
+      return { itemId: r.tracker.itemId, boardId: r.tracker.boardId || '', name, url: r.tracker.url, score: Number(score.toFixed(3)), sharedTokens: shared, confidence: r.confidence || 'candidate' };
+    })
+    .filter(c => c.score > 0 || c.sharedTokens.length)
+    .sort((a,b) => (b.score + b.sharedTokens.length*.15) - (a.score + a.sharedTokens.length*.15))
+    .slice(0, 10);
+  return { row, candidates };
+}
 function ownerAsk(item, extra='') {
   const x = `${item.blocker || ''} ${item.action || ''}`.toLowerCase();
   let ask = 'Please post the next checkpoint/evidence needed to clear this item.';
@@ -884,10 +904,20 @@ const server = http.createServer(async (req, res) => {
       const body = await parseBody(req); if (!body.itemId || !body.text) return send(res, 400, { ok:false, error:'itemId and text required' });
       const destinations = body.destinations === 'primary' ? [] : await linkedDestinations(body.itemId);
       const planned = [{ itemId: String(body.itemId), role:'primary', sourceUrl: body.sourceUrl || '' }, ...destinations.map(d => ({ itemId: String(d.itemId), role:'mirror', url: d.url, name: d.name }))];
-      if (body.dryRun) return send(res, 200, { ok:true, dryRun:true, planned, mirrored: Math.max(0, planned.length - 1), warning: body.destinations !== 'primary' && !destinations.length ? 'No linked destination found. Confirm Source Bridge first.' : null });
+      if (body.dryRun) {
+        const bridge = !destinations.length && body.destinations !== 'primary' ? await bridgeCandidatesForItem(body.itemId) : null;
+        return send(res, 200, {
+          ok:true, dryRun:true, planned, mirrored: Math.max(0, planned.length - 1),
+          primaryPostAvailable: true,
+          bridgeRequiredForMirror: body.destinations !== 'primary' && !destinations.length,
+          warning: body.destinations !== 'primary' && !destinations.length ? 'Primary post is available. No linked mirror destination exists yet, so mirror posting is skipped until Source Bridge is confirmed.' : null,
+          bridgeRow: bridge?.row || null,
+          bridgeCandidates: bridge?.candidates || []
+        });
+      }
       const posted = [];
       const bodyText = await enrichMentions(body.text, body.recipients || []);
-      const primaryText = body.destinations === 'both' ? bridgeComment(bodyText, body.sourceUrl || '', destinations[0]?.url || '') : bodyText;
+      const primaryText = body.destinations === 'both' && destinations.length ? bridgeComment(bodyText, body.sourceUrl || '', destinations[0]?.url || '') : bodyText;
       const primaryUpdateId = await mondayPost(body.itemId, primaryText); posted.push({ itemId: body.itemId, updateId: primaryUpdateId, role:'primary' });
       for (const dest of destinations) {
         const updateId = await mondayPost(dest.itemId, bridgeComment(bodyText, body.sourceUrl || '', dest.url));
