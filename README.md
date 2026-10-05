@@ -16,3 +16,6 @@ Generalized, hosting-ready build.
 
 ## Live sync
 Local work-computer API calls may still be blocked. For real Monday sync, deploy the `SplicingPlanningAssistant` folder to Render/GitHub and set `MONDAY_API_KEY` as an environment variable.
+
+## R20 workflow update
+See [HANDOFF.md](HANDOFF.md) for implemented behavior, test commands, manual Tuesday requests, deployment acceptance and explicit remaining limitations.

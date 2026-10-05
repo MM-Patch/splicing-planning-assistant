@@ -1,1 +1,5 @@
-{"version":"v15","label":"Generalized workflows + hosting-ready package","date":"2026-10-05"}
+{
+  "version": "R20-workflow",
+  "label": "Project workflow and manual Tuesday RFS requests",
+  "date": "2026-10-05"
+}

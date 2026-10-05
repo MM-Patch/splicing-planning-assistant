@@ -1,3 +1,5 @@
+import {createWorkflow} from './lib/workflow-server.mjs';
+import {readiness} from './lib/workflow.mjs';
 import http from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync, createReadStream } from 'node:fs';
@@ -6,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(ROOT, 'data');
+const DATA_DIR = process.env.SPA_DATA_DIR || path.join(ROOT, 'data');
 const PUBLIC = path.join(ROOT, 'public');
 const PORT = Number(process.env.PORT || 8787);
 const MONDAY = 'https://api.monday.com/v2';
@@ -62,7 +64,7 @@ async function mondayToken() {
 async function mondayGraphql(query, variables = {}) {
   const token = await mondayToken();
   if (!token) throw Object.assign(new Error('Missing Monday API token'), { status: 401 });
-  const res = await fetch(MONDAY, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: token }, body: JSON.stringify({ query, variables }) });
+  const res = await fetch(MONDAY, { signal: AbortSignal.timeout(15000), method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: token }, body: JSON.stringify({ query, variables }) });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || json.errors) throw Object.assign(new Error(json.errors?.[0]?.message || `Monday API ${res.status}`), { status: 502, details: json });
   return json.data;
@@ -77,7 +79,7 @@ async function allItems() {
   const seed = await readJson(files.seed, { records: [] });
   const live = await readJson(files.live, { records: [] });
   const byKey = new Map();
-  for (const r of [...seed.records, ...live.records]) {
+  for (const r of [...seed.records.map(r=>({...r,observationSource:'packaged snapshot'})), ...live.records.map(r=>({...r,observationSource:'Monday sync',observedAt:live.syncedAt||null}))]) {
     const k = String(r.itemId || r.id || r.name);
     byKey.set(k, { ...r, sourceUrl: itemUrl(r), searchText: makeSearchText(r) });
   }
@@ -221,7 +223,7 @@ function sourceIdSummary(x){ return `${x.board||x.sourceBoard||''} ${x.boardId||
 async function linkedDestinations(itemId) {
   const rows = await bridgeRecords();
   const row = rows.find(r => String(r.d2d?.itemId) === String(itemId) || String(r.tracker?.itemId) === String(itemId));
-  if (!row) return [];
+  if (!row || row.confidence !== 'manual' || !row.d2d?.boardId || !row.tracker?.boardId) return [];
   return [row.d2d, row.tracker].filter(x => x && String(x.itemId) !== String(itemId));
 }
 async function bridgeCandidatesForItem(itemId) {
@@ -384,7 +386,8 @@ async function behaviorTests() {
 
 async function reminderConfig() {
   const cfg = await readJson(files.reminders, null);
-  return cfg || { enabled:true, day:'Tuesday', time:'06:30', timeZone:'America/Denver', mode:'auto-post', destination:'d2d-item-comments', owners:['Jim','Ben','Chris','Leah','Brad'], lastRunDate:null };
+  return {...(cfg || {}), enabled:false, mode:'preview/manual'};
+  /* return cfg || { enabled:true, day:'Tuesday', time:'06:30', timeZone:'America/Denver', mode:'auto-post', destination:'d2d-item-comments', owners:['Jim','Ben','Chris','Leah','Brad'], lastRunDate:null }; */
 }
 async function saveReminderConfig(cfg) { await writeJson(files.reminders, cfg); return cfg; }
 function mountainDateParts(d=new Date()) {
@@ -432,22 +435,9 @@ async function runTuesdayReminder({dryRun=false, force=false}={}) {
   return result;
 }
 
-setInterval(()=>runTuesdayReminder().catch(e=>console.error('reminder:', e.message)), 60*1000).unref?.();
+// Automatic Tuesday delivery disabled until qualified by live readback acceptance.
 
-function readinessGates(item) {
-  const text = `${item.name} ${item.status} ${item.blocker} ${item.action} ${(item.updates||[]).map(u=>u.text).join(' ')}`.toLowerCase();
-  const gates = [
-    ['constructionAccepted', /construction.*(accepted|complete|done)|bore.*(complete|done|finish)/.test(text) || !/construction|bore/.test(text)],
-    ['scopePrintsCurrent', /scope|print|design|diagram|network/.test(text) ? !/missing.*(scope|print|design)|needs.*(scope|print|design)/.test(text) : true],
-    ['materialsReady', !/material|equipment|po/.test(text) || /material.*(ready|received)|equipment.*(ordered|received)|po.*(approved|submitted)/.test(text)],
-    ['testLightPath', !/splice|light|test/.test(text) ? item.status === 'Ready' : /light|tested|splice.*(complete|scheduled)|test/.test(text) && !/needs.*(light|test)|missing.*(light|test)/.test(text)],
-    ['networkCutoverNamed', !/network|turn.?up|cutover/.test(text) || /network.*(approved|confirmed|scheduled)|turn.?up/.test(text)],
-    ['customerAccessClear', !/customer|access|install/.test(text) || !/needs.*(customer|access)|blocked.*(customer|access)/.test(text)],
-    ['crewDurationBumpRule', !/unassigned|tbd/.test(String(item.assignedResource||'').toLowerCase())]
-  ];
-  const complete = gates.filter(g=>g[1]).length;
-  return { gates:Object.fromEntries(gates), complete, total:gates.length, score:`${complete}/${gates.length}`, ready:complete===gates.length };
-}
+function readinessGates(item) { return readiness(item); }
 function marketKey(item) {
   const city = String(item.city || item.name || '').split(',')[0].trim();
   const code = String(item.name||'').match(/^[A-Z]{3,8}/)?.[0] || city || 'Unknown';
@@ -821,7 +811,7 @@ function send(res, code, obj) { res.writeHead(code, { 'Content-Type': 'applicati
 function serveFile(res, file) {
   const ext = path.extname(file).toLowerCase();
   const type = ext === '.html' ? 'text/html' : ext === '.js' ? 'application/javascript' : ext === '.css' ? 'text/css' : 'application/octet-stream';
-  res.writeHead(200, { 'Content-Type': type }); createReadStream(file).pipe(res);
+  res.writeHead(200, { 'Content-Type': type, 'Cache-Control':'no-cache' }); createReadStream(file).pipe(res);
 }
 async function syncMondayBoards(boardIds = [], limit = 100) {
   const idsArg = boardIds.length ? `(ids:[${boardIds.map(x => String(x).replace(/\D/g, '')).filter(Boolean).join(',')}], limit:${boardIds.length})` : `(limit:20,state:active)`;
@@ -928,8 +918,9 @@ async function optionSetsForUi(){
 }
 function normalizeDateToken(v){
   const raw=String(v||'').trim(); if(!raw) return '';
-  const iso=raw.match(/^(20\d{2})-(\d{1,2})-(\d{1,2})$/); if(iso) return `${iso[1]}-${String(iso[2]).padStart(2,'0')}-${String(iso[3]).padStart(2,'0')}`;
-  const us=raw.match(/^(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?$/); if(us){ const y=us[3] ? (us[3].length===2?'20'+us[3]:us[3]) : String(new Date().getFullYear()); return `${y}-${String(us[1]).padStart(2,'0')}-${String(us[2]).padStart(2,'0')}`; }
+  const valid=(y,m,d)=>{const t=new Date(Date.UTC(Number(y),Number(m)-1,Number(d)));return t.getUTCFullYear()===Number(y)&&t.getUTCMonth()===Number(m)-1&&t.getUTCDate()===Number(d)};
+  const iso=raw.match(/^(20\d{2})-(\d{1,2})-(\d{1,2})$/); if(iso&&!valid(iso[1],iso[2],iso[3]))return ''; if(iso) return `${iso[1]}-${String(iso[2]).padStart(2,'0')}-${String(iso[3]).padStart(2,'0')}`;
+  const us=raw.match(/^(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?$/); if(us){ const y=us[3] ? (us[3].length===2?'20'+us[3]:us[3]) : String(new Date().getFullYear()); if(!valid(y,us[1],us[2]))return ''; return `${y}-${String(us[1]).padStart(2,'0')}-${String(us[2]).padStart(2,'0')}`; }
   return raw;
 }
 function cleanProjectValue(v){ return String(v||'').replace(/[.;,]+$/,'').replace(/^[-:=>\s]+/,'').trim(); }
@@ -951,7 +942,7 @@ function pushProposal(proposed,evidence,field,value,why,confidence='medium'){
   proposed[field]=value; evidence.push({field,value,why,confidence});
 }
 function extractAnyProjectCardFields(raw='', item={}){
-  const text=String(raw||''); const proposed={}; const evidence=[]; const relevantNotes=[];
+  const text=String(raw||''); const proposed={}; const evidence=[]; const relevantNotes=[]; const warnings=[];
   const specs=[
     {field:'owner', rx:/(?:owner|project owner|pm|project manager)\s*(?:is|=|:|to|should be|changed? to)?\s*([^;\n,.]+)/i},
     {field:'assignedResource', rx:/(?:assigned resource|resource|assigned to|crew|splicer|assign)\s*(?:is|=|:|to|should be|changed? to)?\s*([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+){0,3})/i},
@@ -971,13 +962,13 @@ function extractAnyProjectCardFields(raw='', item={}){
     {field:'installDate', rx:/(?:install date|installation date|install|customer activation|activation date)\s*(?:is|=|:|to|should be|changed? to)?\s*(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)/i},
     {field:'workDate', rx:/(?:work date|workday|work day|field date|crew date)\s*(?:is|=|:|to|should be|changed? to)?\s*(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)/i}
   ];
-  for(const spec of dateSpecs){ const m=text.match(spec.rx); if(m) pushProposal(proposed,evidence,spec.field,normalizeDateToken(m[1]),`explicit ${spec.field} date phrase`,'high'); }
-  if(!proposed.status){ if(/\b(no go|blocked|cannot proceed|waiting on|hold|on hold)\b/i.test(text)) pushProposal(proposed,evidence,'status','Blocked','natural-language blocker/status inference','medium'); else if(/\b(ready|good to go|cleared|can proceed)\b/i.test(text)) pushProposal(proposed,evidence,'status','Ready','natural-language ready/status inference','medium'); }
+  for(const spec of dateSpecs){const ms=[...text.matchAll(new RegExp(spec.rx.source,'gi'))];const vals=[...new Set(ms.map(m=>normalizeDateToken(m[1])))];if(vals.length>1||vals.includes('')){warnings.push('Review ambiguous/invalid '+spec.field+' dates; no date applied.');}else if(ms.length)pushProposal(proposed,evidence,spec.field,vals[0],`explicit ${spec.field} date phrase`,'high');}
+  if(!proposed.status){ if(/\b(not ready|no go|blocked|cannot proceed|waiting on|hold|on hold)\b/i.test(text)) pushProposal(proposed,evidence,'status','Blocked','natural-language blocker/status inference','medium'); else if(/\b(ready|good to go|cleared|can proceed)\b/i.test(text)) pushProposal(proposed,evidence,'status','Ready','natural-language ready/status inference','medium'); }
   if(!proposed.priority){ if(/\b(urgent|critical|hot|asap|today)\b/i.test(text)) pushProposal(proposed,evidence,'priority','Hot','urgency keyword inference','medium'); else if(/\b(high priority)\b/i.test(text)) pushProposal(proposed,evidence,'priority','High','priority keyword inference','medium'); }
   if(!proposed.action){ const act=text.match(/(?:need to|needs to|please|next we should|we should|follow up to)\s+([^;\n.]+)/i); if(act) pushProposal(proposed,evidence,'action',act[1],'natural-language action extraction','medium'); }
   if(!proposed.blocker){ const blk=text.match(/(?:waiting on|blocked by|held by|depends on)\s+([^;\n.]+)/i); if(blk) pushProposal(proposed,evidence,'blocker',blk[1],'natural-language dependency/blocker extraction','medium'); }
   for(const sent of text.split(/(?<=[.!?])\s+|\n+/).map(s=>s.trim()).filter(Boolean)){ if(/\b(owner|resource|crew|splicer|type|zone|fiber|status|score|blocker|risk|issue|action|rfs|ready for service|install|activation|priority|work date|waiting on|blocked|ready|complete|live|permit|authority|customer|meeting|note)\b/i.test(sent)) relevantNotes.push(sent); }
-  return { ok:true, sourceItem:{itemId:item.itemId||item.id,name:item.name}, raw:text, extractedFields:Object.keys(proposed), proposedUpdates:proposed, evidence, relevantNotes, mergedPreview:{...item,...proposed}, mondayWriteSupported:false, note:'Preview only: extracted project-card intelligence for human review/comment drafting. It does not overwrite Monday fields unless explicit field-map writeback is enabled.' };
+  return { ok:true, sourceItem:{itemId:item.itemId||item.id,name:item.name}, raw:text, warnings, extractedFields:Object.keys(proposed), proposedUpdates:proposed, evidence, relevantNotes, mergedPreview:{...item,...proposed}, mondayWriteSupported:false, note:'Preview only: extracted project-card intelligence for human review/comment drafting. It does not overwrite Monday fields unless explicit field-map writeback is enabled.' };
 }
 function extractFieldPreview(raw='', item={}){ return extractAnyProjectCardFields(raw,item); }
 async function featureBehaviorTests(){
@@ -990,10 +981,12 @@ async function featureBehaviorTests(){
   return { ok: queryResults.every(x=>x.pass) && Object.keys(fieldPreview.proposedUpdates).length>=4 && options.statuses.length>=3, queryResults, dropdownOptionCounts:{owners:options.owners.length,resources:options.resources.length,statuses:options.statuses.length,types:options.types.length,mondayUsers:options.mondayUsers.length}, fieldPreview, mentions, bridgeCounts:bridge.counts, tuesdayGroups:prep.groups.length, reminderDryRun:{due:reminder.due,groups:reminder.groups.length,posted:reminder.posted||0,queued:reminder.queued||0}, generatedAt:new Date().toISOString() };
 }
 
+const workflowHandler=createWorkflow({allItems,files,readJson,mondayGraphql,mondayToken,parseBody,send,ROOT});
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'OPTIONS') return send(res, 200, { ok: true });
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if(await workflowHandler(req,res,url))return;
     if (req.method === 'HEAD' && url.pathname === '/') return send(res, 200, '');
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/classic')) return serveFile(res, path.join(PUBLIC, 'index.html'));
     if (req.method === 'GET' && url.pathname.startsWith('/assets/')) return serveFile(res, path.join(PUBLIC, url.pathname.replace('/assets/', '')));
@@ -1006,14 +999,7 @@ const server = http.createServer(async (req, res) => {
       for (const r of items || []) bySource[String(r.source || 'unknown')] = (bySource[String(r.source || 'unknown')] || 0) + 1;
       return send(res, 200, { ok: true, configured: Boolean(token), tokenSource: process.env.MONDAY_API_KEY ? 'env' : existsSync(files.secrets) ? 'app secrets' : 'none', items: items.length, stats: stats(items), queued: queue.filter(q => q.status !== 'posted').length, liveSyncedAt: live.syncedAt || null, liveRecords: (live.records || []).length, byBoard, bySource, boards: { d2d: '18391791372', projectTracker: '5077578194' } });
     }
-    if (req.method === 'GET' && url.pathname.startsWith('/api/item/')) {
-      const id = decodeURIComponent(url.pathname.split('/').pop() || '');
-      const item = (await allItems()).find(r => String(r.itemId || r.id) === String(id));
-      if (!item) return send(res, 404, { ok:false, error:'Item not found' });
-      const rows = await bridgeRecords();
-      const bridge = rows.find(r => String(r.d2d?.itemId) === String(item.itemId) || String(r.tracker?.itemId) === String(item.itemId)) || null;
-      return send(res, 200, { ok:true, item, bridge });
-    }
+
     if (req.method === 'GET' && url.pathname === '/api/items') {
       const q = url.searchParams.get('q') || ''; const filters = Object.fromEntries(url.searchParams.entries()); delete filters.q;
       const items = filterItems(await allItems(), q, filters);
@@ -1045,25 +1031,9 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, message: draftMessage(item, body.command || '', body.recipients || extractRecipients(body.command || '')), item });
     }
     if (req.method === 'GET' && url.pathname === '/api/queue') return send(res, 200, { ok: true, queue: await readJson(files.queue, []) });
-    if (req.method === 'POST' && url.pathname === '/api/queue') {
-      const body = await parseBody(req); const queue = await readJson(files.queue, []); const item = body.item || (await allItems()).find(r => String(r.itemId || r.id) === String(body.itemId || body.id));
-      const entry = { id: crypto.randomUUID(), status: 'queued', createdAt: new Date().toISOString(), itemId: body.itemId || item?.itemId, boardId: item?.sourceBoardId || body.boardId, itemName: item?.name || body.itemName, recipients: body.recipients || [], message: body.message || draftMessage(item || {}, body.command || '', body.recipients || []), sourceUrl: itemUrl(item || body) };
-      queue.unshift(entry); await writeJson(files.queue, queue); return send(res, 200, { ok: true, entry });
-    }
-    if (req.method === 'POST' && url.pathname.match(/^\/api\/queue\/[^/]+\/push$/)) {
-      const id = url.pathname.split('/')[3]; const queue = await readJson(files.queue, []); const entry = queue.find(e => e.id === id); if (!entry) return send(res, 404, { ok: false, error: 'Queue entry not found' });
-      const data = await mondayGraphql('mutation($item:ID!,$body:String!){ create_update(item_id:$item, body:$body){ id } }', { item: String(entry.itemId), body: entry.message });
-      entry.status = 'posted'; entry.postedAt = new Date().toISOString(); entry.mondayUpdateId = data.create_update?.id; await writeJson(files.queue, queue);
-      const audit = await readJson(files.audit, []); audit.unshift({ ...entry, event: 'monday_comment_posted' }); await writeJson(files.audit, audit);
-      return send(res, 200, { ok: true, entry });
-    }
-    if (req.method === 'POST' && url.pathname === '/api/monday/comment') {
-      const body = await parseBody(req); if (!body.itemId || !body.text) return send(res, 400, { ok: false, error: 'itemId and text required' });
-      const commentBody = await enrichMentions(body.text, body.recipients || []);
-      const data = await mondayGraphql('mutation($item:ID!,$body:String!){ create_update(item_id:$item, body:$body){ id } }', { item: String(body.itemId), body: commentBody });
-      const audit = await readJson(files.audit, []); audit.unshift({ event: 'direct_monday_comment_posted', itemId: body.itemId, text: commentBody, mondayUpdateId: data.create_update?.id, at: new Date().toISOString() }); await writeJson(files.audit, audit);
-      return send(res, 200, { ok: true, updateId: data.create_update?.id });
-    }
+
+
+
 
     if (req.method === 'GET' && url.pathname.startsWith('/api/bridge/candidates/')) {
       const id = decodeURIComponent(url.pathname.split('/').pop() || '');
@@ -1073,50 +1043,10 @@ const server = http.createServer(async (req, res) => {
       const bridge = await bridgeRecordsCompat();
       return send(res, 200, { ok: true, rows: bridge.rows, counts: bridge.counts });
     }
-    if (req.method === 'POST' && url.pathname === '/api/bridge/link') {
-      const body = await parseBody(req); if (!body.d2dItemId || !body.trackerItemId) return send(res, 400, { ok:false, error:'d2dItemId and trackerItemId required' });
-      const bridge = await readJson(files.bridge, { links: [] });
-      bridge.links = bridge.links.filter(l => String(l.d2dItemId) !== String(body.d2dItemId));
-      bridge.links.unshift({ d2dItemId: String(body.d2dItemId), trackerItemId: String(body.trackerItemId), createdAt: new Date().toISOString(), note: body.note || 'manual link' });
-      await writeJson(files.bridge, bridge); return send(res, 200, { ok:true, bridge });
-    }
-    if (req.method === 'POST' && url.pathname === '/api/monday/dual-comment') {
-      const body = await parseBody(req); if (!body.itemId || !body.text) return send(res, 400, { ok:false, error:'itemId and text required' });
-      const destinations = body.destinations === 'primary' ? [] : await linkedDestinations(body.itemId);
-      const planned = [{ itemId: String(body.itemId), role:'primary', sourceUrl: body.sourceUrl || '' }, ...destinations.map(d => ({ itemId: String(d.itemId), role:'mirror', url: d.url, name: d.name }))];
-      if (body.dryRun) {
-        const bridge = !destinations.length && body.destinations !== 'primary' ? await bridgeCandidatesForItem(body.itemId) : null;
-        return send(res, 200, {
-          ok:true, dryRun:true, planned, mirrored: Math.max(0, planned.length - 1),
-          primaryPostAvailable: true,
-          bridgeRequiredForMirror: body.destinations !== 'primary' && !destinations.length,
-          warning: body.destinations !== 'primary' && !destinations.length ? 'Primary post is available. No linked mirror destination exists yet, so mirror posting is skipped until Source Bridge is confirmed.' : null,
-          bridgeRow: bridge?.row || null,
-          bridgeCandidates: bridge?.candidates || []
-        });
-      }
-      const posted = [];
-      const bodyText = await enrichMentions(body.text, body.recipients || []);
-      const primaryText = body.destinations === 'both' && destinations.length ? bridgeComment(bodyText, body.sourceUrl || '', destinations[0]?.url || '') : bodyText;
-      const primaryUpdateId = await mondayPost(body.itemId, primaryText); posted.push({ itemId: body.itemId, updateId: primaryUpdateId, role:'primary' });
-      for (const dest of destinations) {
-        const updateId = await mondayPost(dest.itemId, bridgeComment(bodyText, body.sourceUrl || '', dest.url));
-        posted.push({ itemId: dest.itemId, updateId, role:'mirror', url: dest.url });
-      }
-      const audit = await readJson(files.audit, []); audit.unshift({ event:'dual_comment_posted', at:new Date().toISOString(), text:bodyText, posted }); await writeJson(files.audit, audit);
-      return send(res, 200, { ok:true, posted, mirrored: posted.length - 1 });
-    }
-    if (req.method === 'GET' && url.pathname === '/api/tuesday/prepare') {
-      const prep = await tuesdayPrep({ owner: url.searchParams.get('owner') || '' });
-      return send(res, 200, { ok:true, ...prep });
-    }
-    if (req.method === 'POST' && url.pathname === '/api/tuesday/queue') {
-      const body = await parseBody(req); const prep = body.prep || await tuesdayPrep({ owner: body.owner || '' });
-      const queue = await readJson(files.queue, []);
-      for (const g of prep.groups || []) queue.unshift({ id: crypto.randomUUID(), status:'queued', type:'tuesday-rfs-owner-alert', createdAt:new Date().toISOString(), owner:g.owner, itemName:`Tuesday RFS prep — ${g.owner}`, message:g.message, destinations:'owner-items', itemCount:g.count });
-      await writeJson(files.queue, queue); await writeJson(files.tuesday, prep);
-      return send(res, 200, { ok:true, queued:(prep.groups||[]).length, prep });
-    }
+
+
+
+
 
     if (req.method === 'POST' && url.pathname === '/api/mentions/resolve') {
       const body = await parseBody(req);
@@ -1127,12 +1057,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok:true, usersCached:users.length, requested:names, matches, enriched });
     }
 
-    if (req.method === 'GET' && url.pathname === '/api/people') {
-      const users = await mondayUsers();
-      const q = String(url.searchParams.get('q') || '').toLowerCase();
-      const filtered = q ? users.filter(u => String(u.name || '').toLowerCase().includes(q) || String(u.email || '').toLowerCase().includes(q)) : users;
-      return send(res, 200, { ok:true, users: filtered.slice(0,200).map(u => ({ id:u.id, name:u.name, email:u.email, enabled:u.enabled })) });
-    }
+
 
     if (req.method === 'POST' && url.pathname === '/api/capture/update') {
       const body = await parseBody(req); const item = (await allItems()).find(r => String(r.itemId || r.id) === String(body.itemId || body.id)) || body.item || {};
@@ -1147,16 +1072,9 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, await behaviorTests());
     }
 
-    if (req.method === 'GET' && url.pathname === '/api/reminders/config') {
-      return send(res, 200, { ok:true, config: await reminderConfig() });
-    }
-    if (req.method === 'POST' && url.pathname === '/api/reminders/config') {
-      const body = await parseBody(req); const cfg = { ...(await reminderConfig()), ...body };
-      await saveReminderConfig(cfg); return send(res, 200, { ok:true, config:cfg });
-    }
-    if (req.method === 'POST' && url.pathname === '/api/reminders/tuesday/run') {
-      const body = await parseBody(req); return send(res, 200, await runTuesdayReminder({ dryRun: !!body.dryRun, force: body.force !== false }));
-    }
+
+
+
 
     if (req.method === 'POST' && url.pathname === '/api/routes/build') {
       const body = await parseBody(req); return send(res, 200, await buildRoutes(body));
