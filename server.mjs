@@ -934,8 +934,20 @@ function normalizeDateToken(v){
 }
 function cleanProjectValue(v){ return String(v||'').replace(/[.;,]+$/,'').replace(/^[-:=>\s]+/,'').trim(); }
 function firstClause(v){ return cleanProjectValue(String(v||'').split(/\s*(?:;|,\s*(?:owner|assigned resource|resource|crew|splicer|type|zone|fiber status|status|score|blocker|action|rfs|install date|priority|update count|work date)\b|\b(?:rfs|install date|priority|update count|work date|action|blocker|status|score)\b\s*)/i)[0]); }
+function canonicalProjectValue(field,value){
+  value=cleanProjectValue(value);
+  const maps={
+    priority:{imported:'Imported',hot:'Hot',high:'High',medium:'Medium',low:'Low',critical:'Critical'},
+    status:{ready:'Ready',conditional:'Conditional',blocked:'Blocked','on hold':'On Hold','needs review':'Needs Review',complete:'Complete'},
+    type:{mdu:'MDU',sfu:'SFU',commercial:'Commercial',mixed:'Mixed',backbone:'Backbone',unknown:'Unknown'},
+    zoneType:{new:'NEW',overbuild:'OVERBUILD',rebuild:'REBUILD',expansion:'EXPANSION',maintenance:'MAINTENANCE',unknown:'UNKNOWN'},
+    fiberStatus:{'complete/live':'Complete/Live',complete:'Complete',live:'Live','in progress':'In Progress','not started':'Not Started',blocked:'Blocked',unknown:'Unknown'}
+  };
+  const key=String(value).toLowerCase();
+  return maps[field]?.[key] || value;
+}
 function pushProposal(proposed,evidence,field,value,why,confidence='medium'){
-  value=field==='blocker'||field==='action'?firstClause(value):cleanProjectValue(value); if(value==='') return;
+  value=field==='blocker'||field==='action'?firstClause(value):cleanProjectValue(value); value=canonicalProjectValue(field,value); if(value==='') return;
   proposed[field]=value; evidence.push({field,value,why,confidence});
 }
 function extractAnyProjectCardFields(raw='', item={}){
