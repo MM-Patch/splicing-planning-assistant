@@ -929,7 +929,7 @@ async function optionSetsForUi(){
 function normalizeDateToken(v){
   const raw=String(v||'').trim(); if(!raw) return '';
   const iso=raw.match(/^(20\d{2})-(\d{1,2})-(\d{1,2})$/); if(iso) return `${iso[1]}-${String(iso[2]).padStart(2,'0')}-${String(iso[3]).padStart(2,'0')}`;
-  const us=raw.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/); if(us){ const y=us[3] ? (us[3].length===2?'20'+us[3]:us[3]) : String(new Date().getFullYear()); return `${y}-${String(us[1]).padStart(2,'0')}-${String(us[2]).padStart(2,'0')}`; }
+  const us=raw.match(/^(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?$/); if(us){ const y=us[3] ? (us[3].length===2?'20'+us[3]:us[3]) : String(new Date().getFullYear()); return `${y}-${String(us[1]).padStart(2,'0')}-${String(us[2]).padStart(2,'0')}`; }
   return raw;
 }
 function cleanProjectValue(v){ return String(v||'').replace(/[.;,]+$/,'').replace(/^[-:=>\s]+/,'').trim(); }
@@ -967,9 +967,9 @@ function extractAnyProjectCardFields(raw='', item={}){
   ];
   for(const spec of specs){ const m=text.match(spec.rx); if(m) pushProposal(proposed,evidence,spec.field,m[1],`explicit ${spec.field} phrase`,'high'); }
   const dateSpecs=[
-    {field:'rfs', rx:/(?:rfs|ready for service|service date)\s*(?:date)?\s*(?:is|=|:|to|should be|changed? to)?\s*(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i},
-    {field:'installDate', rx:/(?:install date|installation date|install|customer activation|activation date)\s*(?:is|=|:|to|should be|changed? to)?\s*(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i},
-    {field:'workDate', rx:/(?:work date|workday|work day|field date|crew date)\s*(?:is|=|:|to|should be|changed? to)?\s*(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i}
+    {field:'rfs', rx:/(?:rfs|ready for service|service date)\s*(?:date)?\s*(?:is|=|:|to|should be|changed? to)?\s*(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)/i},
+    {field:'installDate', rx:/(?:install date|installation date|install|customer activation|activation date)\s*(?:is|=|:|to|should be|changed? to)?\s*(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)/i},
+    {field:'workDate', rx:/(?:work date|workday|work day|field date|crew date)\s*(?:is|=|:|to|should be|changed? to)?\s*(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)/i}
   ];
   for(const spec of dateSpecs){ const m=text.match(spec.rx); if(m) pushProposal(proposed,evidence,spec.field,normalizeDateToken(m[1]),`explicit ${spec.field} date phrase`,'high'); }
   if(!proposed.status){ if(/\b(no go|blocked|cannot proceed|waiting on|hold|on hold)\b/i.test(text)) pushProposal(proposed,evidence,'status','Blocked','natural-language blocker/status inference','medium'); else if(/\b(ready|good to go|cleared|can proceed)\b/i.test(text)) pushProposal(proposed,evidence,'status','Ready','natural-language ready/status inference','medium'); }
