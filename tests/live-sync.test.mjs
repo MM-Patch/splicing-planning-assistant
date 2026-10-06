@@ -14,3 +14,5 @@ test('explicit intermediate relation plus unique project ID verifies, conflictin
 });
 
 test('shared project identifier does not authorize a different sub-scope',()=>{const d={itemId:'1',sourceBoardId:'18391791372',observationSource:'Monday sync',identityEvidence:[{projectId:'F1',name:'Lake Phase 2',observedAt:'now'}]},t={itemId:'2',sourceBoardId:'5077578194',observationSource:'Monday sync',projectId:'F1',name:'POP fence'};assert(!bridgeFor(d,[d,t]).verified);assert.match(bridgeFor(d,[d,t]).reason,/scope/);});
+
+test('completed Tracker work is not reopened by normalization',()=>{const r=normalizeItem({id:'5077578194',name:'Project Tracker'},{id:'1',name:'Done',column_values:[{column:{title:'Project Status'},text:'Complete/Live'}]},'now');assert.equal(r.status,'Complete');assert.equal(r.rawStatus,'Complete/Live');});
