@@ -37,6 +37,7 @@ async function readJson(file, fallback) {
   try { return JSON.parse(await readFile(file, 'utf8')); } catch { return fallback; }
 }
 async function writeJson(file, value) { await writeFile(file, JSON.stringify(value, null, 2)); }
+if (storage.loadSync) { try { const persisted=await storage.loadSync(); if (persisted?.complete && persisted.records?.length) await writeJson(files.live,persisted); } catch {} }
 async function masterKey() {
   const env = process.env.SPA_SECRET_KEY;
   if (env) return crypto.createHash('sha256').update(env).digest();
@@ -821,7 +822,7 @@ async function syncMondayBoards(boardIds=['18391791372','5077578194']) {
  if(syncTask)return syncTask;
  syncState={state:'running',startedAt:new Date().toISOString()};
  syncTask=(async()=>{try{
- const live=await readBoards(mondayGraphql,boardIds,{pageSize:50,onProgress:p=>Object.assign(syncState,p)});
+ const live=await readBoards(mondayGraphql,boardIds,{pageSize:50,onProgress:p=>Object.assign(syncState,p)}); if(storage.saveSync) await storage.saveSync(live);
  trackDateChanges(live,await readJson(files.live,{}));
  await writeJson(files.live+'.tmp',live);await rename(files.live+'.tmp',files.live);
  syncState={state:'complete',syncedAt:live.syncedAt,records:live.records.length,boards:live.boards,scope:live.scope};return {ok:true,...syncState};
