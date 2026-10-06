@@ -1,7 +1,8 @@
 import {createWorkflow} from './lib/workflow-server.mjs';
+import {readBoards,activeRecords} from './lib/live-sync.mjs';
 import {readiness} from './lib/workflow.mjs';
 import http from 'node:http';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { existsSync, createReadStream } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,7 +65,7 @@ async function mondayToken() {
 async function mondayGraphql(query, variables = {}) {
   const token = await mondayToken();
   if (!token) throw Object.assign(new Error('Missing Monday API token'), { status: 401 });
-  const res = await fetch(MONDAY, { signal: AbortSignal.timeout(15000), method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: token }, body: JSON.stringify({ query, variables }) });
+  const res = await fetch(MONDAY, { signal: AbortSignal.timeout(60000), method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: token }, body: JSON.stringify({ query, variables }) });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || json.errors) throw Object.assign(new Error(json.errors?.[0]?.message || `Monday API ${res.status}`), { status: 502, details: json });
   return json.data;
@@ -76,14 +77,8 @@ function itemUrl(r) {
   return '';
 }
 async function allItems() {
-  const seed = await readJson(files.seed, { records: [] });
-  const live = await readJson(files.live, { records: [] });
-  const byKey = new Map();
-  for (const r of [...seed.records.map(r=>({...r,observationSource:'packaged snapshot'})), ...live.records.map(r=>({...r,observationSource:'Monday sync',observedAt:live.syncedAt||null}))]) {
-    const k = String(r.itemId || r.id || r.name);
-    byKey.set(k, { ...r, sourceUrl: itemUrl(r), searchText: makeSearchText(r) });
-  }
-  return [...byKey.values()];
+ const seed=await readJson(files.seed,{records:[]}),live=await readJson(files.live,{records:[]});
+ return activeRecords(seed,live).map(r=>({...r,sourceUrl:itemUrl(r),searchText:makeSearchText(r)}));
 }
 function makeSearchText(r) {
   return [r.name, r.city, r.owner, r.assignedResource, r.type, r.status, r.blocker, r.action, r.itemId, r.source, r.priority].filter(Boolean).join(' ').toLowerCase();
@@ -813,25 +808,16 @@ function serveFile(res, file) {
   const type = ext === '.html' ? 'text/html' : ext === '.js' ? 'application/javascript' : ext === '.css' ? 'text/css' : 'application/octet-stream';
   res.writeHead(200, { 'Content-Type': type, 'Cache-Control':'no-cache' }); createReadStream(file).pipe(res);
 }
-async function syncMondayBoards(boardIds = [], limit = 100) {
-  const idsArg = boardIds.length ? `(ids:[${boardIds.map(x => String(x).replace(/\D/g, '')).filter(Boolean).join(',')}], limit:${boardIds.length})` : `(limit:20,state:active)`;
-  const data = await mondayGraphql(`query { boards${idsArg} { id name items_page(limit:${Math.min(Number(limit)||100,500)}) { items { id name updated_at group { title } column_values { id text value column { title type } } updates(limit:5) { id text_body created_at creator { id name email } } } } } }`);
-  const records = [];
-  for (const b of data.boards || []) for (const it of b.items_page?.items || []) {
-    const cols = Object.fromEntries((it.column_values || []).map(cv => [cv.column?.title || cv.id, cv.text || '']));
-    const status = cols.Status || cols.status || cols['Fiber Status'] || 'Open';
-    records.push({
-      id: `monday:${it.id}`, source: 'Monday Live', sourceBoard: b.name, sourceBoardId: b.id, itemId: it.id, sourceUrl: `https://visionary-broadband.monday.com/boards/${b.id}/pulses/${it.id}`,
-      name: it.name, city: cols.City || cols.Market || '', owner: cols.PM || cols.Owner || cols['Project Manager'] || 'Unassigned', assignedResource: cols.Splicer || cols['Assigned Resource'] || cols.Resource || 'Unassigned',
-      type: cols.Type || cols['Project Type'] || 'Monday Item', status: /block/i.test(status) ? 'Blocked' : /ready|rfs/i.test(status) ? 'Ready' : 'Conditional', score: /ready|rfs/i.test(status) ? 7 : /block/i.test(status) ? 2 : 4,
-      blocker: cols.Blocker || cols.Dependency || '', action: cols['Next Action'] || cols.Action || '', rfs: cols.RFS || cols['RFS Date'] || '', workDate: cols.RFS || cols['RFS Date'] || '', priority: cols.Priority || '', updateCount: (it.updates || []).length,
-      updates: (it.updates || []).map(u => ({ author: u.creator?.name || '', date: u.created_at, text: u.text_body || '' })), rawColumns: cols, updatedAt: it.updated_at
-    });
-  }
-  await writeJson(files.live, { syncedAt: new Date().toISOString(), records });
-  return { ok: true, records: records.length, boards: (data.boards || []).map(b => ({ id: b.id, name: b.name })) };
+let syncState={state:'idle'},syncTask=null;
+async function syncMondayBoards(boardIds=['18391791372','5077578194']) {
+ if(syncTask)return syncTask;
+ syncState={state:'running',startedAt:new Date().toISOString()};
+ syncTask=(async()=>{try{
+ const live=await readBoards(mondayGraphql,boardIds,{pageSize:50,onProgress:p=>Object.assign(syncState,p)});
+ await writeJson(files.live+'.tmp',live);await rename(files.live+'.tmp',files.live);
+ syncState={state:'complete',syncedAt:live.syncedAt,records:live.records.length,boards:live.boards,scope:live.scope};return {ok:true,...syncState};
+ }catch(e){syncState={state:'failed',error:'Live sync failed; previous complete data retained.',detail:e.message,finishedAt:new Date().toISOString()};throw e;}finally{syncTask=null;}})();return syncTask;
 }
-
 
 async function pmoDashboard(){
   const items = await allItems();
@@ -997,7 +983,7 @@ const server = http.createServer(async (req, res) => {
       for (const r of live.records || []) byBoard[String(r.sourceBoardId || 'unknown')] = (byBoard[String(r.sourceBoardId || 'unknown')] || 0) + 1;
       const bySource = {};
       for (const r of items || []) bySource[String(r.source || 'unknown')] = (bySource[String(r.source || 'unknown')] || 0) + 1;
-      return send(res, 200, { ok: true, configured: Boolean(token), tokenSource: process.env.MONDAY_API_KEY ? 'env' : existsSync(files.secrets) ? 'app secrets' : 'none', items: items.length, stats: stats(items), queued: queue.filter(q => q.status !== 'posted').length, liveSyncedAt: live.syncedAt || null, liveRecords: (live.records || []).length, byBoard, bySource, boards: { d2d: '18391791372', projectTracker: '5077578194' } });
+      return send(res, 200, { ok: true, configured: Boolean(token), tokenSource: process.env.MONDAY_API_KEY ? 'env' : existsSync(files.secrets) ? 'app secrets' : 'none', items: items.length, stats: stats(items), queued: queue.filter(q => q.status !== 'posted').length, liveSyncedAt: live.syncedAt || null, lastSync:live.syncedAt||null, syncComplete:live.complete===true, syncScope:live.scope||null, liveRecords: (live.records || []).length, byBoard, bySource, boards: { d2d: '18391791372', projectTracker: '5077578194' } });
     }
 
     if (req.method === 'GET' && url.pathname === '/api/items') {
@@ -1019,8 +1005,9 @@ const server = http.createServer(async (req, res) => {
       const data = await mondayGraphql('query { me { id name email } }'); return send(res, 200, { ok: true, me: data.me });
     }
     if (req.method === 'GET' && url.pathname === '/api/monday/diagnostics') return send(res, 200, await mondayDiagnostics());
+    if(req.method==='GET'&&url.pathname==='/api/monday/sync/status')return send(res,200,{ok:true,...syncState});
     if (req.method === 'POST' && url.pathname === '/api/monday/sync') {
-      const body = await parseBody(req); return send(res, 200, await syncMondayBoards(body.boardIds || ['18391791372','5077578194'], body.limit || 100));
+      const body=await parseBody(req);const task=syncMondayBoards(body.boardIds||['18391791372','5077578194']);if(body.background){task.catch(()=>{});return send(res,202,{ok:true,...syncState});}return send(res,200,await task);
     }
     if (req.method === 'POST' && url.pathname === '/api/monday/users') {
       const data = await mondayGraphql('query { users(limit:100) { id name email enabled } }'); await writeJson(files.users, { syncedAt: new Date().toISOString(), users: data.users || [] }); return send(res, 200, { ok: true, users: data.users || [] });

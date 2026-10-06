@@ -61,3 +61,12 @@ Outputs: `test-results/browser-results.json`, `delivery.test.mjs` test output, s
 - A real async selection race was reproduced and corrected: old source loads could clear newly typed notes. Editors now disable until loading completes, and stale loads are rejected.
 - Hosted pre-deployment probe returned 404 for `/api/build`; therefore the prior hosted version was NOT R20. A subsequent hosted test must be recorded separately after deployment.
 - No live Monday comment, native notification, operational field write or Teams delivery performed.
+
+## R21 live-source qualification (2026-10-05)
+- R20 deployment was proven, but its single large Monday query timed out, leaving only packaged records.
+- Sync now exhausts cursor pages for D2D 18391791372 and Tracker 5077578194, 50 items per query, and atomically publishes a complete batch. UI starts background sync and displays progress; status is `/api/monday/sync/status`.
+- A complete batch replaces (does not union with) packaged snapshots. Source mode, timestamps and per-board counts are shown. Tuesday preparation excludes packaged records. Scope: active board items, latest five updates/item, not subitems.
+- Bridge verification accepts exact explicit relations, or D2D relation → linked FTTH record's exact Project ID → unique Tracker Project ID. Evidence includes source column, intermediate board/item, ID, timestamp. Name similarity never verifies. Ambiguous many-to-one/one-to-many mappings remain unmatched/primary-only.
+- Initial read-only source investigation found 419 D2D and 2,682 Tracker items. These are not hosted deployment proof; hosted sync must be run after deploy.
+- Safe live-write preparation: choose explicitly approved sacrificial item IDs AND exact text first; primary dry-run must show board/item/text, then confirmed post, then remote readback verifies update ID, body, item and board. Retry uses the same delivery key and does not blindly repost uncertain mutations. Until approved, use dry-run only. No native mention delivery or live writeback is claimed by local fixture tests.
+- Automatic Tuesday sending stays disabled. Queue/copy/export do not post. Queues on Render's ephemeral filesystem are not durable across deployments; do not treat this as production persistence.
