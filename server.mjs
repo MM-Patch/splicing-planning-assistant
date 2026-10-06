@@ -1,6 +1,7 @@
 import {createWorkflow} from './lib/workflow-server.mjs';
 import {readBoards,activeRecords,trackDateChanges} from './lib/live-sync.mjs';
 import {readiness} from './lib/workflow.mjs';
+import {createStorage} from './lib/storage.mjs';
 import http from 'node:http';
 import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises';
 import { existsSync, createReadStream } from 'node:fs';
@@ -16,6 +17,7 @@ const MONDAY = 'https://api.monday.com/v2';
 const INACTIVE_PEOPLE = ['kelley','kelly','kelly leeper'];
 function isInactivePersonName(name='') { return INACTIVE_PEOPLE.includes(String(name).replace(/^@/,'').trim().toLowerCase()); }
 await mkdir(DATA_DIR, { recursive: true });
+const storage = await createStorage({databaseUrl:process.env.DATABASE_URL,files:{queue:path.join(DATA_DIR,'queue.json'),audit:path.join(DATA_DIR,'audit.json')}});
 
 const files = {
   seed: path.join(DATA_DIR, 'seed.json'),
@@ -974,7 +976,7 @@ async function featureBehaviorTests(){
   return { ok: queryResults.every(x=>x.pass) && Object.keys(fieldPreview.proposedUpdates).length>=4 && options.statuses.length>=3, queryResults, dropdownOptionCounts:{owners:options.owners.length,resources:options.resources.length,statuses:options.statuses.length,types:options.types.length,mondayUsers:options.mondayUsers.length}, fieldPreview, mentions, bridgeCounts:bridge.counts, tuesdayGroups:prep.groups.length, reminderDryRun:{due:reminder.due,groups:reminder.groups.length,posted:reminder.posted||0,queued:reminder.queued||0}, generatedAt:new Date().toISOString() };
 }
 
-const workflowHandler=createWorkflow({allItems,files,readJson,mondayGraphql,mondayToken,parseBody,send,ROOT});
+const workflowHandler=createWorkflow({allItems,files,readJson,mondayGraphql,mondayToken,parseBody,send,ROOT,storage});
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'OPTIONS') return send(res, 200, { ok: true });
