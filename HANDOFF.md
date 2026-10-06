@@ -41,7 +41,7 @@ Outputs: `test-results/browser-results.json`, `delivery.test.mjs` test output, s
 - Approved sacrificial live comment/readback on one verified pair and real native mention evidence. No operational posts authorized or executed during this work.
 - Readiness evidence adapters for actual board columns/comments. Current unqualified source records deliberately show unknown; do not infer seven passed gates from status.
 - Full natural-language reasoning and multi-project transcript extraction are not proven; extraction is deterministic and human-reviewed. Invalid/conflicting date proposals are withheld.
-- Production SSO/authentication and external webhook authentication review remain outstanding. Existing inbound webhook integration is not qualified by these tests. Do not equate an exposed endpoint with a verified mirror subscription.
+- Production SSO/authentication and external webhook authentication review remain outstanding. Existing inbound webhook automatic mutation is paused: without authenticated events and shared dedup it could echo the new dual posts and create duplicates. Challenge handling remains; events do not post. Do not equate an exposed endpoint with a verified mirror subscription.
 - Durable delivery/queue/audit storage. Render free ephemeral filesystem is NOT durable across redeploys. Use a persistent SPA_DATA_DIR and one worker, or migrate journal/queue locking to a transactional database before relying on dedup across deployment or replicas. Do not claim global exactly-once delivery.
 - Existing live sync may be capped; a count of loaded records is not completeness proof. User lookup pagination >100 remains deferred.
 - Tuesday messages with multiple projects require human content/target review. There is no unattended sending.
