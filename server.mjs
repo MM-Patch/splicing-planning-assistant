@@ -1,8 +1,8 @@
 import {createWorkflow} from './lib/workflow-server.mjs';
-import {readBoards,activeRecords} from './lib/live-sync.mjs';
+import {readBoards,activeRecords,trackDateChanges} from './lib/live-sync.mjs';
 import {readiness} from './lib/workflow.mjs';
 import http from 'node:http';
-import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises';
 import { existsSync, createReadStream } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -76,9 +76,15 @@ function itemUrl(r) {
   if (r.itemId) return `https://visionary-broadband.monday.com/pulses/${r.itemId}`;
   return '';
 }
+// Cache by file identity; preserve the array identity for bridge indexing.
+// Stat (including inode) detects atomic sync replacement, deletion and external updates.
+let itemsCache={key:null,value:null};
 async function allItems() {
- const seed=await readJson(files.seed,{records:[]}),live=await readJson(files.live,{records:[]});
- return activeRecords(seed,live).map(r=>({...r,sourceUrl:itemUrl(r),searchText:makeSearchText(r)}));
+ const signature=async file=>{try{const s=await stat(file);return [s.ino,s.size,s.mtimeMs,s.ctimeMs].join(':');}catch{return 'missing';}};
+ const key=(await Promise.all([signature(files.seed),signature(files.live)])).join('|');
+ if(itemsCache.key===key)return itemsCache.value;
+ const pending=(async()=>{const [seed,live]=await Promise.all([readJson(files.seed,{records:[]}),readJson(files.live,{records:[]})]);return activeRecords(seed,live).map(r=>({...r,sourceUrl:itemUrl(r),searchText:makeSearchText(r)}));})();
+ itemsCache={key,value:pending};return pending;
 }
 function makeSearchText(r) {
   return [r.name, r.city, r.owner, r.assignedResource, r.type, r.status, r.blocker, r.action, r.itemId, r.source, r.priority].filter(Boolean).join(' ').toLowerCase();
@@ -814,6 +820,7 @@ async function syncMondayBoards(boardIds=['18391791372','5077578194']) {
  syncState={state:'running',startedAt:new Date().toISOString()};
  syncTask=(async()=>{try{
  const live=await readBoards(mondayGraphql,boardIds,{pageSize:50,onProgress:p=>Object.assign(syncState,p)});
+ trackDateChanges(live,await readJson(files.live,{}));
  await writeJson(files.live+'.tmp',live);await rename(files.live+'.tmp',files.live);
  syncState={state:'complete',syncedAt:live.syncedAt,records:live.records.length,boards:live.boards,scope:live.scope};return {ok:true,...syncState};
  }catch(e){syncState={state:'failed',error:'Live sync failed; previous complete data retained.',detail:e.message,finishedAt:new Date().toISOString()};throw e;}finally{syncTask=null;}})();return syncTask;
