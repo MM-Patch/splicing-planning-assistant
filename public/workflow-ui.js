@@ -16,7 +16,7 @@ function paintInspector(r,d='',bridge=r.bridge){
  E('dest').addEventListener('change',()=>{if(E('dest').value!=='primary'&&!activeBridge?.verified)stateLabel('Unverified bridge — linked/both posting blocked');});
 }
 async function select(r){
- if(!r)return;rememberCard();closeModal();++selectionEpoch;selected=r;selectedTextTags=[];
+ if(!r)return;rememberCard();closeModal();++selectionEpoch;selected=r;selectedTextTags=[];try{const fd=await api('/api/project/full-detail?boardId='+encodeURIComponent(r.sourceBoardId)+'&itemId='+encodeURIComponent(r.itemId));if(fd?.rawMonday){selected={...r,rawMonday:fd.rawMonday,rawColumns:Object.fromEntries((fd.rawMonday.column_values||[]).map(c=>[c.id,c.display_value||c.text||c.value||'']))};}}catch(e){selected={...r,detailError:e.message};}
  // ALL is the complete last observed live batch (timestamp displayed), including
  // bridge/readiness. Selection must not wait on another network round trip.
  paintInspector(selected);loadProjectCardOptions('pc');
