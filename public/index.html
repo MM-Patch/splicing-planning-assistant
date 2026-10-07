@@ -146,4 +146,4 @@ function loadKpi(){let by=(key)=>Object.entries(ALL.reduce((m,r)=>{let k=r[key]|
 function keys(e){if((e.key==='Enter'||e.key==='NumpadEnter')&&!e.shiftKey&&document.activeElement===E('q')){e.preventDefault();run()}if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();queueDraft()}if(e.key==='Escape')resetAll()}
 
 
-</script><script src="/assets/workflow-ui.js"></script><script>init();</script></body></html>
+</script><script src="/assets/workflow-ui.js"></script><script>init();</script><script>function clearMeetingFilters(){['meetingOwner','meetingResource','meetingStatus','meetingDateRange'].forEach(id=>{const e=document.getElementById(id);if(e)e.value='';});loadMeetingBrief()}function meetingPrev(){}function meetingNext(){}function markMeetingReviewed(){const e=document.getElementById('meetingRows');if(e)e.insertAdjacentHTML('afterbegin','<p class="meta">Project marked reviewed locally — not saved to Monday.</p>')}</script></body></html>
